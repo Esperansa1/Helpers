@@ -1,0 +1,87 @@
+# Define the pipeline stages order
+stages:
+  - lint      # First, check code style (fast fail if bad)
+  - test      # Then, run unit tests
+  - build     # Then, build the Docker image
+  - deploy    # Finally, deploy to environment (only if safe)
+
+# Set some defaults for all jobs
+default:
+  image: python:3.11-slim    # Use a lightweight Python 3.11 image for all jobs unless overridden
+  cache:
+    paths:
+      - .cache/pip           # Cache pip downloads between jobs to speed up installs
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"  # Tell pip to use a local cache directory
+
+# ------------------------------
+# 1. Linting: Check PEP8 Compliance
+# ------------------------------
+sql_importer_lint:
+  stage: lint
+  script:
+    - echo "Running flake8 linting..."
+    - pip install flake8                  # Install the linter
+    - cd sql_importer                     # Go into the SQL Importer project
+    - flake8 .                             # Lint everything under current folder
+  rules:
+    - changes:
+        - sql_importer/**/*                # Only run this job if sql_importer code changed
+      when: always                         # Always run if changes detected
+
+# ------------------------------
+# 2. Testing: Run Unit Tests
+# ------------------------------
+sql_importer_test:
+  stage: test
+  script:
+    - echo "Running pytest..."
+    - pip install -r sql_importer/requirements.txt  # Install project dependencies
+    - pip install pytest                            # Install pytest for testing
+    - cd sql_importer
+    - pytest tests/                                 # Run tests inside the tests/ folder
+  rules:
+    - changes:
+        - sql_importer/**/*
+      when: always
+
+# ------------------------------
+# 3. Build: Build and Push Docker Image
+# ------------------------------
+sql_importer_build:
+  stage: build
+  image: docker:20.10.16           # Use Docker image (instead of python) for this job
+  services:
+    - docker:20.10.16-dind         # Enable Docker-in-Docker so we can build containers
+  variables:
+    DOCKER_DRIVER: overlay2        # Set Docker driver for better performance
+  before_script:
+    - echo "Logging into Docker registry..."
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+      # Authenticate to GitLab Container Registry securely
+  script:
+    - echo "Building docker image for sql_importer..."
+    - docker build -t $CI_REGISTRY_IMAGE/sql_importer:$CI_COMMIT_SHA sql_importer
+      # Build the Docker image, tag it with the current commit SHA
+    - docker push $CI_REGISTRY_IMAGE/sql_importer:$CI_COMMIT_SHA
+      # Push the image to GitLab Registry so it can be used later for deployment
+  rules:
+    - changes:
+        - sql_importer/**/*
+      when: always
+
+# ------------------------------
+# 4. Deploy: Only when pushing to 'main' branch
+# ------------------------------
+sql_importer_deploy:
+  stage: deploy
+  script:
+    - echo "Deploying sql_importer..."
+    - chmod +x sql_importer/deploy.sh          # Make sure deploy script is executable
+    - ./sql_importer/deploy.sh                  # Run the deployment script
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'         # Only deploy if the branch is 'main'
+      changes:
+        - sql_importer/**/*
+      when: always
